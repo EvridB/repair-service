@@ -1,10 +1,13 @@
 #!/bin/bash
-# Скрипт для проверки Race Condition
-echo "Запуск параллельных запросов на одну заявку..."
+# Скрипт для проверки Race Condition (два мастера пытаются взять одну заявку)
+URL="http://localhost:8000/api/requests/1/take"
+TOKEN_MASTER_1="Bearer master_1_token"
+TOKEN_MASTER_2="Bearer master_2_token"
 
-# Пытаемся одновременно взять заявку №1 от имени двух мастеров
-curl -X POST http://localhost:8000/requests/1/take &
-curl -X POST http://localhost:8000/requests/1/take &
+echo "Запуск параллельных запросов..."
+
+curl -X POST $URL -H "Authorization: $TOKEN_MASTER_1" -s -o /dev/null -w "Мастер 1: %{http_code}\n" &
+curl -X POST $URL -H "Authorization: $TOKEN_MASTER_2" -s -o /dev/null -w "Мастер 2: %{http_code}\n" &
 
 wait
-echo -e "\nПроверка завершена. Один запрос должен вернуть 200, второй 409."
+echo "Проверка завершена. Один должен быть 200, второй 409."
