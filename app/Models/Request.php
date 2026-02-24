@@ -18,7 +18,7 @@ class Request extends Model
         'problemText',
         'status',
         'assignedTo',
-        'version' // Поле для защиты от гонки (Optimistic Lock)
+        'version' // Поле для оптимистичной блокировки
     ];
 
     /**
@@ -30,10 +30,19 @@ class Request extends Model
     }
 
     /**
-     * Связь с мастером (пользователем)
+     * Связь с мастером (назначенным пользователем)
+     * Добавляем метод с именем, которое ожидает контроллер
+     */
+    public function assignedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assignedTo');
+    }
+
+    /**
+     * Алиас для удобства (опционально)
      */
     public function master(): BelongsTo
     {
-        return $this->belongsTo(User::class, 'assignedTo');
+        return $this->assignedUser();
     }
 }
