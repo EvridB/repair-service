@@ -6,26 +6,21 @@ services:
       - "8000:8000"
     volumes:
       - .:/var/www
-    environment:
-      DB_CONNECTION: pgsql
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_DATABASE: repair_db
-      DB_USERNAME: admin
-      DB_PASSWORD: password
     depends_on:
-      db:
-        condition: service_healthy
+      - db
+    networks:
+      - repair_network
 
   db:
     image: postgres:15-alpine
     container_name: repair-db
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d repair_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
     environment:
-      POSTGRES_DB: repair_db
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
+      - POSTGRES_DB=repair_db
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+    networks:
+      - repair_network
+
+networks:
+  repair_network:
+    driver: bridge

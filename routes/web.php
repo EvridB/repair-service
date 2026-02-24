@@ -3,32 +3,26 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\RequestController;
 use App\Models\Request as RepairRequest;
-use App\Models\User;
 
-// ЭКРАН 1: Создание заявки
+// 1. Главная страница - Форма создания (Клиент)
 Route::get('/', function () {
     return view('create');
-})->name('home');
+})->name('requests.create');
 
 Route::post('/requests', [RequestController::class, 'store'])->name('requests.store');
 
-// ЭКРАН 2: Панель диспетчера
-Route::get('/dispatcher', function () {
-    return view('dispatcher', [
-        'requests' => RepairRequest::all(),
-        'masters' => User::where('role', 'master')->get()
-    ]);
-})->name('dispatcher.index');
+// 2. Панель диспетчера
+Route::get('/dispatcher', [RequestController::class, 'index'])->name('dispatcher.index');
 
-Route::post('/requests/{id}/assign', [RequestController::class, 'assign'])->name('requests.assign');
-
-// ЭКРАН 3: Панель мастера
+// 3. Панель мастера (Исправлено имя модели!)
 Route::get('/master', function () {
-    $master = User::where('role', 'master')->first();
-    return view('master', [
-        'requests' => RepairRequest::where('assignedTo', $master->id)->get(),
-        'master' => $master
-    ]);
+    // Берем все заявки, кроме новых, чтобы мастер видел назначенные ему
+    $orders = RepairRequest::where('status', '!=', 'new')->get();
+    return view('master', compact('orders'));
 })->name('master.index');
 
+// 4. Кнопки действий
+Route::patch('/requests/{id}/cancel', [RequestController::class, 'cancel'])->name('requests.cancel');
+Route::patch('/requests/{id}/done', [RequestController::class, 'done'])->name('requests.done');
+Route::post('/requests/{id}/assign', [RequestController::class, 'assign'])->name('requests.assign');
 Route::post('/requests/{id}/take', [RequestController::class, 'takeToWork'])->name('requests.take');

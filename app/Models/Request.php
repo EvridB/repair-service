@@ -2,12 +2,14 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory; // <--- ДОБАВЛЕНО
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Request extends Model
 {
-    // Указываем, какие поля можно заполнять (из твоего ТЗ)
+    use HasFactory; // <--- ДОБАВЛЕНО (это разрешает работу фабрик)
+
     protected $fillable = [
         'clientName', 
         'phone', 
@@ -17,7 +19,6 @@ class Request extends Model
         'assignedTo'
     ];
 
-    // Связь заявки с мастером (пользователем)
     public function master(): BelongsTo
     {
         return $this->belongsTo(User::class, 'assignedTo');
