@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Symfony\Component\HttpFoundation\Response;
 
 class RequestController extends Controller
 {
@@ -16,7 +17,7 @@ class RequestController extends Controller
      */
     public function index(Request $request)
     {
-        $query = RepairRequest::with(['logs.user']);
+        $query = RepairRequest::with(['logs.user', 'assignedUser']);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -37,12 +38,13 @@ class RequestController extends Controller
     }
 
     /**
-     * Панель мастера
+     * Панель мастера (фильтруем только назначенные текущему мастеру)
      */
     public function masterIndex()
     {
         $orders = RepairRequest::with(['logs.user'])
-            ->where('status', '!=', 'new')
+            ->where('assignedTo', Auth::id()) // Только свои заявки
+            ->whereIn('status', ['assigned', 'in_progress', 'done'])
             ->latest()
             ->get();
 
@@ -55,21 +57,16 @@ class RequestController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'clientName' => 'required',
-            'phone' => 'required',
-            'address' => 'required',
-            'problemText' => 'required',
+            'clientName'  => 'required|string|max:255',
+            'phone'       => 'required|string|max:20',
+            'address'     => 'required|string|max:500',
+            'problemText' => 'required|string',
         ]);
 
         return DB::transaction(function () use ($validated) {
             $repairRequest = RepairRequest::create($validated + ['status' => 'new']);
             
-            RequestLog::create([
-                'repair_request_id' => $repairRequest->id,
-                'user_id' => Auth::id(),
-                'old_status' => null,
-                'new_status' => 'new',
-            ]);
+            $this->logStatusChange($repairRequest->id, null, 'new');
 
             return redirect()->route('dispatcher.index')->with('success', 'Заявка создана');
         });
@@ -80,69 +77,54 @@ class RequestController extends Controller
      */
     public function assign(Request $request, $id)
     {
+        $request->validate(['master_id' => 'required|exists:users,id']);
+
         return DB::transaction(function () use ($request, $id) {
-            $repairRequest = RepairRequest::where('id', $id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
+            $repairRequest = RepairRequest::where('id', $id)->lockForUpdate()->firstOrFail();
+            
             $oldStatus = $repairRequest->status;
-
             $repairRequest->update([
                 'status' => 'assigned',
                 'assignedTo' => $request->master_id
             ]);
 
-            RequestLog::create([
-                'repair_request_id' => $repairRequest->id,
-                'user_id' => Auth::id(),
-                'old_status' => $oldStatus,
-                'new_status' => 'assigned',
-            ]);
+            $this->logStatusChange($repairRequest->id, $oldStatus, 'assigned');
 
             return back()->with('success', 'Мастер назначен');
         });
     }
 
     /**
-     * Взять в работу (Мастер)
-     * РЕАЛИЗАЦИЯ ЗАЩИТЫ ОТ RACE CONDITION
+     * Взять в работу (Мастер) - ЗАЩИТА ОТ RACE CONDITION
      */
     public function takeToWork($id)
     {
         try {
             return DB::transaction(function () use ($id) {
-                // lockForUpdate блокирует строку, пока транзакция не завершится
+                // ПРОВЕРКА "ГОНКИ": lockForUpdate блокирует строку в БД
                 $repairRequest = RepairRequest::where('id', $id)
                     ->lockForUpdate() 
                     ->firstOrFail();
                 
-                // Проверяем статус: если он уже не 'assigned', значит кто-то успел раньше
+                // Если статус уже не assigned, возвращаем 409
                 if ($repairRequest->status !== 'assigned') {
-                    abort(409, 'Заявка уже взята в работу другим мастером.');
+                    return $this->errorResponse('Заявка уже взята в работу или недоступна.', Response::HTTP_CONFLICT);
+                }
+
+                // Проверка, что заявка назначена именно этому мастеру
+                if ($repairRequest->assignedTo !== Auth::id()) {
+                    return $this->errorResponse('Это не ваша заявка.', Response::HTTP_FORBIDDEN);
                 }
 
                 $oldStatus = $repairRequest->status;
                 $repairRequest->update(['status' => 'in_progress']);
 
-                RequestLog::create([
-                    'repair_request_id' => $repairRequest->id,
-                    'user_id' => Auth::id(),
-                    'old_status' => $oldStatus,
-                    'new_status' => 'in_progress',
-                ]);
+                $this->logStatusChange($repairRequest->id, $oldStatus, 'in_progress');
 
-                if (request()->expectsJson()) {
-                    return response()->json(['message' => 'Заявка взята'], 200);
-                }
-
-                return back()->with('success', 'Вы взяли заявку в работу');
+                return $this->successResponse('Вы взяли заявку в работу');
             });
-        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
-            // Если запрос от скрипта (Race test), возвращаем JSON 409
-            if (request()->expectsJson()) {
-                return response()->json(['error' => $e->getMessage()], 409);
-            }
-            return back()->with('error', $e->getMessage());
+        } catch (\Exception $e) {
+            return $this->errorResponse('Ошибка сервера', Response::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
 
@@ -152,17 +134,16 @@ class RequestController extends Controller
     public function done($id)
     {
         return DB::transaction(function () use ($id) {
-            $repairRequest = RepairRequest::findOrFail($id);
-            $oldStatus = $repairRequest->status;
+            $repairRequest = RepairRequest::where('id', $id)->lockForUpdate()->firstOrFail();
 
+            if ($repairRequest->status !== 'in_progress') {
+                return back()->with('error', 'Заявка должна быть в статусе "В работе"');
+            }
+
+            $oldStatus = $repairRequest->status;
             $repairRequest->update(['status' => 'done']);
 
-            RequestLog::create([
-                'repair_request_id' => $repairRequest->id,
-                'user_id' => Auth::id(),
-                'old_status' => $oldStatus,
-                'new_status' => 'done',
-            ]);
+            $this->logStatusChange($repairRequest->id, $oldStatus, 'done');
 
             return back()->with('success', 'Заявка выполнена!');
         });
@@ -179,14 +160,36 @@ class RequestController extends Controller
 
             $repairRequest->update(['status' => 'canceled']);
 
-            RequestLog::create([
-                'repair_request_id' => $repairRequest->id,
-                'user_id' => Auth::id(),
-                'old_status' => $oldStatus,
-                'new_status' => 'canceled',
-            ]);
+            $this->logStatusChange($repairRequest->id, $oldStatus, 'canceled');
 
             return back()->with('success', 'Заявка отменена');
         });
+    }
+
+    /**
+     * Вспомогательные методы для чистоты кода
+     */
+    private function logStatusChange($requestId, $old, $new)
+    {
+        RequestLog::create([
+            'repair_request_id' => $requestId,
+            'user_id' => Auth::id(),
+            'old_status' => $old,
+            'new_status' => $new,
+        ]);
+    }
+
+    private function successResponse($message)
+    {
+        return request()->expectsJson() 
+            ? response()->json(['message' => $message], 200) 
+            : back()->with('success', $message);
+    }
+
+    private function errorResponse($message, $code)
+    {
+        return request()->expectsJson() 
+            ? response()->json(['error' => $message], $code) 
+            : back()->with('error', $message);
     }
 }
