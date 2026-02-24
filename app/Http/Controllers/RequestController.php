@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Auth;
 class RequestController extends Controller
 {
     /**
-     * Панель диспетчера (соответствует роуту dispatcher.index)
+     * Панель диспетчера
      */
     public function index(Request $request)
     {
@@ -29,7 +29,7 @@ class RequestController extends Controller
     }
 
     /**
-     * Страница создания заявки (соответствует роуту requests.create)
+     * Страница создания заявки
      */
     public function create()
     {
@@ -37,7 +37,7 @@ class RequestController extends Controller
     }
 
     /**
-     * Панель мастера (соответствует роуту master.index)
+     * Панель мастера
      */
     public function masterIndex()
     {
@@ -76,12 +76,15 @@ class RequestController extends Controller
     }
 
     /**
-     * Назначение мастера
+     * Назначение мастера (Диспетчер)
      */
     public function assign(Request $request, $id)
     {
         return DB::transaction(function () use ($request, $id) {
-            $repairRequest = RepairRequest::findOrFail($id);
+            $repairRequest = RepairRequest::where('id', $id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $oldStatus = $repairRequest->status;
 
             $repairRequest->update([
@@ -101,29 +104,46 @@ class RequestController extends Controller
     }
 
     /**
-     * Взять в работу (соответствует роуту takeToWork)
+     * Взять в работу (Мастер)
+     * РЕАЛИЗАЦИЯ ЗАЩИТЫ ОТ RACE CONDITION
      */
     public function takeToWork($id)
     {
-        return DB::transaction(function () use ($id) {
-            $repairRequest = RepairRequest::findOrFail($id);
-            
-            if ($repairRequest->status !== 'assigned') {
-                return back()->with('error', 'Заявка недоступна для работы');
+        try {
+            return DB::transaction(function () use ($id) {
+                // lockForUpdate блокирует строку, пока транзакция не завершится
+                $repairRequest = RepairRequest::where('id', $id)
+                    ->lockForUpdate() 
+                    ->firstOrFail();
+                
+                // Проверяем статус: если он уже не 'assigned', значит кто-то успел раньше
+                if ($repairRequest->status !== 'assigned') {
+                    abort(409, 'Заявка уже взята в работу другим мастером.');
+                }
+
+                $oldStatus = $repairRequest->status;
+                $repairRequest->update(['status' => 'in_progress']);
+
+                RequestLog::create([
+                    'repair_request_id' => $repairRequest->id,
+                    'user_id' => Auth::id(),
+                    'old_status' => $oldStatus,
+                    'new_status' => 'in_progress',
+                ]);
+
+                if (request()->expectsJson()) {
+                    return response()->json(['message' => 'Заявка взята'], 200);
+                }
+
+                return back()->with('success', 'Вы взяли заявку в работу');
+            });
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            // Если запрос от скрипта (Race test), возвращаем JSON 409
+            if (request()->expectsJson()) {
+                return response()->json(['error' => $e->getMessage()], 409);
             }
-
-            $oldStatus = $repairRequest->status;
-            $repairRequest->update(['status' => 'in_progress']);
-
-            RequestLog::create([
-                'repair_request_id' => $repairRequest->id,
-                'user_id' => Auth::id(),
-                'old_status' => $oldStatus,
-                'new_status' => 'in_progress',
-            ]);
-
-            return back()->with('success', 'Вы взяли заявку в работу');
-        });
+            return back()->with('error', $e->getMessage());
+        }
     }
 
     /**
